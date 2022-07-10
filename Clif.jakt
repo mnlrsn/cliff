@@ -1,0 +1,475 @@
+/// A simple implementation of a clifford algebra for 2 to
+/// 8 dimensions. Multiplicative inverse implemented up to
+/// 4 dimensions.
+/// 
+/// Copyright 2022 Morten Larsen
+
+
+class Clif {
+
+    /// Dimensions refer to the number of orthonormal basis vectors
+    /// of grade 1 represented by this multivector.
+    dimensions: u8
+    
+    /// Elements contains all the elements of all grades of the
+    /// multivector. The elements are arranged in the order of 
+    /// increased index, for instance in case of a 3D space: 
+    /// e0 (the scalar), e1, e2, e3, e1e2, e1e3, e2e3, e1e2e3
+    elements: [f64]
+
+    /// The blade map contains the blades as identified by their
+    /// signature at each position in the elements array.
+    /// Ex. for 3D: at position 4 of the blade map will be stored
+    /// 0b00000011 corresponding to e1e2.
+    natural_pos_to_signature: [u8]
+
+    /// The reverse blade map contains the positions in the 
+    /// elements array of a given blade (interpreted as a u8 index).
+    /// Ex: in a 3D multivector, the signature 0b00000101, 
+    /// representing e1e3, will be interpreted as the index 5u8,
+    /// and the reverse blade map will contain 5u8 at this position
+    /// meaning that the related value is at index 5 of the elements
+    /// array.
+    signature_to_natural_pos: [u16]
+
+    /// Generate function that creates a Clif
+    public function generate(dimensions: u8) throws -> Clif {
+
+        mut clif: Clif = Clif(dimensions, elements: [0f64; 0], natural_pos_to_signature: [0u8; 0], signature_to_natural_pos: [0u16; 0])
+        clif.init()
+
+        return clif
+    }
+
+    public function init(mut this) throws {
+        .elements = [0f64; .no_of_elements()]
+        .natural_pos_to_signature = [0u8; .no_of_elements()]
+        .signature_to_natural_pos = [0u16; .no_of_elements()]
+        .build_blademap()
+        .build_reverse_blade_mop()
+    }
+
+    function no_of_elements(this) -> u16 =>  1u16 << .dimensions 
+    function grade_of_signature(signature: u8) => popcount(bitfield: signature as! u32)
+
+    public function scalar(this) =>  .elements[0]
+
+    /// Sets an element in the elements array based on the 
+    /// signature of the element and not the index in the array
+    public function set_element(mut this, signature: u8, value: f64) {
+        //let element_index = .signature_to_natural_pos[signature]
+        .elements[signature] = value
+    }
+
+    function build_blademap(mut this) throws {
+        // We start from grade 1 at index 1. 
+        // Grade 0 (the scalar) will be at position 0
+        mut grade = 1u8
+        mut idx = 1u8
+        while (grade <= .dimensions) {
+            let cc = CombinatoricCalculator::generate(n: .dimensions, k: grade)
+            let grade_elements: [u8] = cc.get_combinations()
+            for j in 0u32..grade_elements.size() as! u32 {
+                .natural_pos_to_signature[idx++]=grade_elements[j]
+            }
+            grade++
+        }
+    }
+
+    function build_reverse_blade_mop(mut this) {
+        for i in 0u16..(this.natural_pos_to_signature.size() as! u16) {
+            let signature = .natural_pos_to_signature[i]
+            .signature_to_natural_pos[signature] = i
+        }
+    }
+
+    /// Shallow copy of the object
+    public function copy(this) throws -> Clif {
+        mut copy = Clif(dimensions: .dimensions, elements: [0f64; 0], natural_pos_to_signature: [0u8; 0], signature_to_natural_pos: [0u16; 0])
+        copy.elements = .elements
+        copy.natural_pos_to_signature = .natural_pos_to_signature
+        copy.signature_to_natural_pos = .signature_to_natural_pos
+        return copy
+    }
+
+    function copy_elements(this) throws -> [f64] {
+        mut copy = [0f64; .elements.size()]
+        // FIXME: z and s do not need to be defined as variables
+        //        but should be used directly in the range definition
+        let s: usize = .elements.size()
+        let z: usize = 0uz
+        for i in z..s {
+            copy[i] = .elements[i]
+        }
+        return copy
+    }
+
+    /// Implementation function to create the elmements for the
+    /// result of a multivector multiplication
+    function multiply_multivector_elements(this, other: Clif) throws -> [f64] {
+        // TODO: assert that the two clifs are the same size 
+        //       or even better, make them templated based
+        //       on a parameter that sets the dimensions in the 
+        //       class so the typechecker can verify that the
+        //       two operands in the multiplication are of the 
+        //       same dimension
+
+        mut new_elements = [0f64; .no_of_elements()]
+
+        for my_signature in 0u8..this.no_of_elements() as! u8 {
+            //let my_signature: u8 = i as! u8
+            let my_value = .elements[my_signature] 
+            for other_signature in 0u8..this.no_of_elements() as! u8 {
+                let other_value = other.elements[other_signature]
+                //let other_signature = .natural_pos_to_signature[j]
+
+                let new_signature = my_signature ^ other_signature
+
+                // Check if sign flips in product of the two blades
+                let sign = sign_of_blade_multiplication(signature_lx: my_signature, signature_rx: other_signature) 
+                mut product = my_value * other_value * sign
+                
+                //let new_element_index = .signature_to_natural_pos[new_signature]  
+                //let dbg_elem_before = new_elements[new_element_index]
+                new_elements[new_signature] += product
+            }
+        }
+
+        return new_elements 
+    }
+
+    /// A parallel to operator*=() in C++
+    /// Currently not able to return this (issue #500)
+    public function multiply_in_place(mut this, other: Clif) throws {
+        let new_elements = this.multiply_multivector_elements(other) 
+        .elements = new_elements
+        // re-instate when #500 is resolved
+        //    return this
+    }
+
+    public function multiply(this, other: Clif) throws -> Clif {
+        mut result = .copy()
+        result.multiply_in_place(other) 
+        return result
+    }
+
+    // Some involutions to calculate the inverse
+    // Ref: http://repository.essex.ac.uk/19733/1/MVInverse_rv_14Feb2017.pdf
+    // FIXME: Generalise for higher dimension algebras
+
+    /// Generalised involution operation.
+    /// Different grades are inversed for different types of 
+    /// involution. Grades fall in groups of one or two grades
+    /// that can be identified by optionally adding 1 and 
+    /// dividing by 1 or 2 (integer division) and determining 
+    /// if the result is odd. If so, the sign of the elements 
+    /// of that grade is flipped.
+    function involution_impl(this, grade_addend: u8, grade_divisor: u8) throws -> Clif {
+        mut new_elements: [f64] = .copy_elements()
+        for signature in 0u8..this.no_of_elements() as! u8 {
+            //let signature = .natural_pos_to_signature[i]
+            let grade = grade_of_signature(signature)
+            let grade_group_for_operation = (grade + grade_addend) / grade_divisor
+            if grade_group_for_operation % 2 == 1 {
+                new_elements[signature] *= -1f64
+            }
+        }
+        mut result = .copy()
+        result.elements = new_elements
+        return result    
+    }
+
+    /// Space inversion
+    /// Space inversion is obtained by negating the sign of odd grades.
+    /// Return a copy of this with spatial grades inverted
+    public function space_inverted(this) throws -> Clif {
+        return .involution_impl(grade_addend: 0, grade_divisor: 1)
+    }
+
+    /// Reversion
+    /// Reversion is obtained by negating the sign of grades 2 and 3, 
+    /// 6 and 7, and so on. 
+    /// Return a copy of this with bi-, tri-, grade-6-7, etc. vectors negated
+    public function reverted(this) throws -> Clif {
+        return .involution_impl(grade_addend: 0, grade_divisor: 2)
+    }
+
+    /// Conjugation
+    /// Conjugation (specifically, Clifford conjugation) is obtained by
+    /// negating grades 1 and 2, 5 and 6, and so on.
+    /// Return a copy of this with grade 1-2-, grade 5-6-, etc. vectors negated
+    public function conjugated(this) throws -> Clif {
+        return .involution_impl(grade_addend: 1, grade_divisor: 2)
+    }
+
+    /// Needed for multiplicative inverse of 4 dimensional MV
+    /// Negates grades 3 and 4.
+    function involuted_m_3_4(this) throws -> Clif {
+        return .involution_impl(grade_addend: 1, grade_divisor: 4)
+    }
+
+
+    /// Calculate the multiplicative inverse of multivectors of
+    /// dimensions 2, 3 and 4.
+    public function multiplicative_inverse(this) throws -> Clif {
+
+        // Algorithm, taken from: 
+        // http://repository.essex.ac.uk/19733/1/MVInverse_rv_14Feb2017.pdf
+        // The approach is to multiply various involuted versions
+        // of the multivector and the multivector to be inverted
+        // to obtain a pure scalar in the denominator while keeping 
+        // the product of the conjugates in the nominator.
+        // The exact number and nature of conjugates needed depends 
+        // on the number of dimensions.
+        // 1. Obtain the simple conjugated multivector
+        // 2. For dimensions above 2, multiply further involutes 
+        // 3. Multiply the multivector to be inverted onto the 
+        //    conjugates and take the scalar to obtain the denominator
+        // 4. Divide the scalar from step 3 into the conjugates 
+        //    product achived in step 2.
+        // 5. Return the result
+
+        mut conjugated: Clif = .conjugated()
+
+        mut divisor: f64 = 1.0
+
+        mut nominator: Clif = .conjugated()
+
+        if .dimensions == 3 or .dimensions == 4 {
+            // In the case of 3 or 4 dimensions, more inversions
+            // need to be multiplied onto the conjugation of this in
+            // order to obtain a pure scalar in the denominator. The
+            // exact inversion operation to apply depends on the 
+            // dimensions
+            let conjugated_product = .multiply(other: conjugated)
+  
+            mut conjugated_involuted: Clif = conjugated_product // Placeholder until the reverted version can be set
+            if .dimensions == 3 {
+                conjugated_involuted = conjugated_product.reverted()
+            } else if .dimensions == 4 {
+                conjugated_involuted = conjugated_product.involuted_m_3_4()
+            }
+
+            nominator.multiply_in_place(other: conjugated_involuted)
+        } else {
+            // TODO: Implement multiplicative inverse for higher dimensions
+        }
+
+        // By multiplying this multivector with the nominator we obtain 
+        // a pure scalar that can simply be divided into the nominator and returned
+        let denominator = .multiply(other: nominator)
+        divisor = denominator.scalar()
+
+        // TODO: REduce level of hackiness - this impl. breaks encapsulation
+        let z: usize = 0
+        let s: usize = nominator.elements.size()
+        for i in z..s {
+            nominator.elements[i] /= divisor 
+        }
+
+        return nominator
+    }
+
+
+    /// When multiplying two blades, the sign of the multiplication of
+    /// each basis vector is flipped (due to the anticommutative nature
+    /// of vector products) for each other basis vector there is in
+    /// between the basis vectors of the same dimension in the 
+    /// elements of the product. Ex: e1e2*e2e3 == e1e3 since e2e2 == 1
+    /// and they are right next to each other. e1e2*e1e3 == -e2e3, since
+    /// it can be re-written as -e2e1*e1e3, which is -e2e3.
+    /// Therefore, if there is an odd number of basis vectors of different
+    /// dimensions between two basis vectors of the same dimension in the
+    /// product, then the sign is flipped. 
+    /// Since the order of the bits in the signature is right-to-left,
+    /// the two sides have to be swapped in the combined signature.
+    function sign_of_blade_multiplication(signature_lx: u8, signature_rx: u8) -> f64 {
+        // Ex: signature_lx = 0b0011 (representing e1e2)
+        //     signature_rx = 0b0101 (representing e1e3)
+        mut combined_sig: u16 = signature_rx as! u16 << 8 | signature_lx
+        // Combined sig: 0b0000010100000011 
+
+        // The algorithm is only relevant if the same basis vector (e.g.,
+        // e1) is present in the blade on both sides of the operation. A
+        // mask of two well-placed bits can check that
+        let basis_vec_mask: u16 = 0b0000000100000001
+
+        // To find the number of basis vectors between the two e1 on both 
+        // sides of the multiplication, create a mask to "catch" the seven 
+        // bits between them.  
+        let mask: u16 = 0b0000000011111110
+
+        // A popcount of the bits in that 7-bit interval will reveal the
+        // number of sign flips. If the number is odd, the sign is flipped.
+        mut signflip: bool = false
+
+        // FIXME: We don't need to go through all 8 steps if there is 
+        // simple way to bail out when all relevant dimensions are 
+        // checked. This can be found by counting leading zeroes of
+        // the two signatures.  
+        
+        for i in 0..8 {
+            // Identify if two basis vectors are present on both sides 
+            // of the multiplication
+            let e_i_mask = combined_sig & basis_vec_mask
+            // Check if the basis vector is present on both sides or on the
+            // right hand side of the multiplication. In both cases, the 
+            // sign flips if the number of basis vectors between the two is 
+            // odd. 
+            if (e_i_mask == basis_vec_mask or e_i_mask == 0b0000000100000000) {
+                let basis_vectors_between = popcount(bitfield: (combined_sig & mask) as! u32)
+                if basis_vectors_between % 2 == 1 {
+                    signflip = not signflip
+                }
+                // If two basis vectors were found, remove them. If only 
+                // one was found, move it from the right hand side to the 
+                // left hand side of the multiplication.
+                combined_sig ^= basis_vec_mask
+            }
+            
+            combined_sig >>= 1
+        }
+
+        if signflip {
+            return -1.0
+        } else {
+            return 1.0
+        }
+    }            
+}
+
+/// A class to calculate and hold the permutations (n,k)
+/// Each element is represented 
+class CombinatoricCalculator {
+
+    n: u8
+    k: u8
+    combinations: [u8] 
+    step: u8 // index to combinations[] during construction
+
+    public function generate(n: u8, k: u8) throws -> CombinatoricCalculator {
+        mut cc = CombinatoricCalculator(n, k, combinations: [], step: 0u8)
+        cc.init()
+        return cc
+    }
+
+    /// Function to create the table of positions of elements in the
+    /// elements array.
+    /// See: https://stackoverflow.com/questions/127704/algorithm-to-return-all-combinations-of-k-elements-from-n
+    public function init(mut this) throws {
+        let numerator = falling_factorial(x: .n, m: .k)
+        let denominator = fak(x: .k) 
+        let no_of_combinations = numerator/denominator
+        this.combinations = [0u8; no_of_combinations as! u8]
+
+        this.recursive_generation(result: 0u8, len: this.k, start_pos: 0)
+    }
+
+    function recursive_generation(mut this, result: u8, len: u8, start_pos: u8) throws {
+        if len == 0 {            
+            this.combinations[this.step] = result
+            this.step++
+        } else {
+            let end_point: u8 = this.n - len + 1
+            for i in start_pos..end_point {
+                this.recursive_generation(result: result | (1u8 << i), len: len-1, start_pos: i+1)
+            }
+        }
+    }
+
+    public function get_combinations(this) -> [u8] {return this.combinations}
+}
+
+
+// +++++++++++++++ Various supporting maths functions +++++++++++++++
+
+
+/// Square root. When calls to external functions become
+/// possible, this definition can be removed.
+// FIXME: Call library function when available
+function sqrt_local(x: f64) -> f64 {
+    if x < 0f64 {
+        return 0f64/0f64 // Return NaN
+    } else if x == 0f64 {
+        return 0f64
+    } 
+
+    mut r: f64 = x/2.0
+    for i in 0..10 {
+        r = (r+x/r)/2.0
+    }
+    return r
+}
+
+
+/// Falling factorial
+function falling_factorial(x: u8, m: u8) -> u32 {
+    let endpoint = x-m
+    return falling_factorial_to_endpoint(x, endpoint)
+}
+
+/// Factorial
+function fak(mut x: u8) -> u32 {
+    return falling_factorial_to_endpoint(x, endpoint: 1)
+}
+
+/// Helper function for factorials
+function falling_factorial_to_endpoint(mut x: u8, endpoint: u8) -> u32 {
+    if x <= 1 {
+        return 1
+    }
+
+    mut result: u32 = x as! u32
+    while (--x > endpoint) {
+        result *= x as! u32
+    }
+    return result
+}
+
+// FIXME: Call version from library, which in turn will call an 
+// intrinsic
+function popcount(bitfield: u32) -> u8 {
+    mut popcnt :u8 = 0;
+    mut bitfld = bitfield
+    while (bitfld != 0u32) {
+        if ((bitfld & 0b01u32) == 0b01u32) {
+            popcnt++
+        }
+        bitfld >>= 1
+    }
+    return popcnt 
+}
+
+
+function main() {
+    let dimensions = 4u8
+
+    mut clif1 = Clif::generate(dimensions)
+    clif1.set_element(signature:  0b00u8, value: 1.0)
+    clif1.set_element(signature:  0b01u8, value: 20.0) 
+    clif1.set_element(signature:  0b10u8, value: 31.0) 
+    clif1.set_element(signature: 0b100u8, value: 42.0) 
+    clif1.set_element(signature:  0b11u8, value: 5.0) 
+    clif1.set_element(signature: 0b101u8, value: 6.0) 
+    clif1.set_element(signature: 0b110u8, value: 7.0) 
+    clif1.set_element(signature: 0b111u8, value: 8.0)
+    clif1.set_element(signature:0b1000u8, value: 3.0)
+    clif1.set_element(signature:0b1001u8, value: 2.0) 
+    clif1.set_element(signature:0b1010u8, value: 3.0) 
+    clif1.set_element(signature:0b1100u8, value: 4.0) 
+    clif1.set_element(signature:0b1011u8, value: 15.0) 
+    clif1.set_element(signature:0b1101u8, value: 16.0) 
+    clif1.set_element(signature:0b1110u8, value: 17.0) 
+    clif1.set_element(signature:0b1111u8, value: 18.0) 
+    println("clif1:  {}", clif1)
+
+    let clif1_inv = clif1.multiplicative_inverse()
+    println("clif1_inv: {}", clif1_inv)
+    println("")
+
+    let clif_multiplied = clif1.multiply(other: clif1_inv)
+    println("clif1 multiplied with its inverse: {}", clif_multiplied)
+
+}
+
+
